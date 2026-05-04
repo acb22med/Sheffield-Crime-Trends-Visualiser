@@ -116,15 +116,26 @@ def fit_prophet(train: pd.Series, horizon: int) -> ProphetResult:
     df = train.reset_index()
     df.columns = ["ds", "y"]
 
+    # yearly_seasonality=True defaults to Fourier order 10, which severely
+    # overfits on <2 years of monthly data. We disable it and re-add with
+    # order 3 — enough to capture summer/winter patterns without oscillating.
     m = Prophet(
-        yearly_seasonality=True,
+        yearly_seasonality=False,
         weekly_seasonality=False,
         daily_seasonality=False,
         seasonality_mode=config_v1.FORECAST.prophet_seasonality_mode,
+        changepoint_prior_scale=0.05,
     )
+    m.add_seasonality(name="yearly", period=365.25, fourier_order=3)
     m.fit(df)
+
     future = m.make_future_dataframe(periods=horizon, freq="MS")
     fc = m.predict(future)
+
+    # Crime counts cannot be negative — clip the full forecast frame.
+    for col in ("yhat", "yhat_lower", "yhat_upper"):
+        fc[col] = fc[col].clip(lower=0)
+
     yhat = fc.set_index("ds")["yhat"].iloc[-horizon:]
     return ProphetResult(model=m, forecast=fc, yhat=yhat)
 
@@ -181,9 +192,11 @@ def walk_forward(series: pd.Series,
 def run(monthly: pd.DataFrame) -> pd.DataFrame:
     """Fit final ARIMA/Prophet on all data, save them, return CV metrics."""
     series = (
-        monthly.set_index("month_date")["crime_count"].astype(float).sort_index()
+        monthly.set_index("month_date")["crime_count"]
+        .astype(float)
+        .sort_index()
+        .asfreq("MS", fill_value=0)   # fills any missing months; also sets .freq correctly
     )
-    series.index.freq = "MS"
 
     cv = walk_forward(series)
     cv.to_csv(config_v1.DATA_DIR / "forecast_cv.csv", index=False)

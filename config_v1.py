@@ -87,16 +87,18 @@ class ClusterConfig:
 
 @dataclass
 class ForecastConfig:
-    test_horizon_months: int = 6
-    cv_initial_months: int = 18
-    cv_step_months: int = 3
+    test_horizon_months: int = 3           # was 6 — too long for 18 months of history
+    cv_initial_months: int = 10            # was 18 — produced 0 CV folds (range was empty)
+    cv_step_months: int = 2               # was 3 — gives 3 folds: [10,12,14]
     arima_order_search: List[Tuple[int, int, int]] = field(
         default_factory=lambda: [
             (1, 1, 1), (2, 1, 1), (1, 1, 2), (2, 1, 2),
             (0, 1, 1), (1, 0, 1), (3, 1, 1),
+            (0, 0, 1), (1, 0, 0), (2, 0, 0), (0, 1, 2),
         ]
     )
     prophet_seasonality_mode: str = "additive"
+    prophet_yearly_seasonality: bool = True
 
 
 @dataclass

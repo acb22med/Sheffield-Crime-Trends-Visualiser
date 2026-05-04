@@ -41,14 +41,13 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (accuracy_score, classification_report, f1_score,
                              precision_score, recall_score, roc_auc_score)
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVC
 
 import config
 
@@ -98,13 +97,39 @@ def _compute_priors(train_df: pd.DataFrame, target: str
     # Overall density (frequency of each grid cell)
     priors["grid_freq"] = train_df["grid_id"].value_counts(normalize=True)
 
-    # Smoothed violent-rate prior per grid cell
+    # Smoothed violent-rate prior per coarse grid cell (2dp, ~1 km)
     grid_group = train_df.groupby("grid_id")[target]
     priors["violent_rate_grid"] = _smoothed_rate(
         counts=grid_group.count(),
         sums=grid_group.sum(),
         global_rate=global_rate,
     )
+
+    # Smoothed violent-rate prior on a finer 3dp grid (~100 m cells).
+    # Smaller k because fine cells have fewer observations by construction.
+    fine_id = (
+        train_df["latitude"].round(3).astype(str) + "_"
+        + train_df["longitude"].round(3).astype(str)
+    )
+    fine_group = train_df.groupby(fine_id)[target]
+    priors["violent_rate_grid_fine"] = _smoothed_rate(
+        counts=fine_group.count(),
+        sums=fine_group.sum(),
+        global_rate=global_rate,
+        k=5,
+    )
+
+    # Smoothed violent-rate prior per street name (finer than any grid cell).
+    # Streets near nightlife hubs have 60-70% violent rate; retail streets <10%.
+    if "street" in train_df.columns:
+        street_group = train_df.groupby("street")[target]
+        priors["violent_rate_street"] = _smoothed_rate(
+            counts=street_group.count(),
+            sums=street_group.sum(),
+            global_rate=global_rate,
+            k=10,
+        )
+        priors["street_crime_count"] = train_df["street"].value_counts()
 
     # Smoothed violent-rate prior per LSOA (if column present)
     if "lsoa_code" in train_df.columns:
@@ -138,11 +163,14 @@ def build_features(df: pd.DataFrame,
 
     global_rate = float(priors["global_rate"].iloc[0])
 
+    month_rad = df["month_num"].to_numpy() * (2 * np.pi / 12)
     X = pd.DataFrame({
-        "latitude":  df["latitude"].to_numpy(),
-        "longitude": df["longitude"].to_numpy(),
-        "month_num": df["month_num"].to_numpy(),
-        "quarter":   df["quarter"].to_numpy(),
+        "latitude":   df["latitude"].to_numpy(),
+        "longitude":  df["longitude"].to_numpy(),
+        "month_num":  df["month_num"].to_numpy(),
+        "month_sin":  np.sin(month_rad),   # cyclical: Dec and Jan are adjacent
+        "month_cos":  np.cos(month_rad),
+        "quarter":    df["quarter"].to_numpy(),
     })
 
     # Distance to Sheffield city centre (degrees → rough km multiplier).
@@ -164,6 +192,27 @@ def build_features(df: pd.DataFrame,
                     .fillna(global_rate)
                     .to_numpy()
     )
+
+    fine_id = (
+        df["latitude"].round(3).astype(str) + "_"
+        + df["longitude"].round(3).astype(str)
+    )
+    X["violent_rate_grid_fine"] = (
+        fine_id.map(priors["violent_rate_grid_fine"])
+               .fillna(global_rate)
+               .to_numpy()
+    )
+
+    if "violent_rate_street" in priors and "street" in df.columns:
+        X["violent_rate_street"] = (
+            df["street"].map(priors["violent_rate_street"])
+                        .fillna(global_rate)
+                        .to_numpy()
+        )
+        X["log_street_crimes"] = np.log1p(
+            df["street"].map(priors["street_crime_count"]).fillna(0).to_numpy()
+        )
+
     if "violent_rate_lsoa" in priors:
         X["violent_rate_lsoa"] = (
             df["lsoa_code"].map(priors["violent_rate_lsoa"])
@@ -197,12 +246,16 @@ def _make_models() -> Dict[str, Pipeline]:
                 class_weight=cw,
                 n_jobs=-1, random_state=rs)),
         ]),
-        "svm": Pipeline([
-            ("scaler", StandardScaler()),
-            ("clf", SVC(C=config.CLASSIFIER.svm_c,
-                        probability=True,
-                        class_weight=cw,
-                        random_state=rs)),
+        # HistGradientBoosting: O(N log N), trains on full dataset, native
+        # class_weight support — replaces the O(N²) subsampled SVM.
+        "hist_gradient_boosting": Pipeline([
+            ("clf", HistGradientBoostingClassifier(
+                max_iter=400,
+                max_depth=6,
+                learning_rate=0.05,
+                min_samples_leaf=20,
+                class_weight=cw,
+                random_state=rs)),
         ]),
     }
 
@@ -220,23 +273,6 @@ def evaluate(y_true: np.ndarray, y_pred: np.ndarray,
         "roc_auc":   float(roc_auc_score(y_true, y_proba)),
     }
 
-
-def _subsample(X: pd.DataFrame, y: pd.Series, n: int,
-               random_state: int) -> Tuple[pd.DataFrame, pd.Series]:
-    """Stratified random subsample used to cap the SVM training size."""
-    if len(X) <= n:
-        return X, y
-    rng = np.random.default_rng(random_state)
-    idx_pos = np.flatnonzero(y.to_numpy() == 1)
-    idx_neg = np.flatnonzero(y.to_numpy() == 0)
-    share_pos = len(idx_pos) / len(y)
-    n_pos = int(round(n * share_pos))
-    n_neg = n - n_pos
-    pick_pos = rng.choice(idx_pos, size=min(n_pos, len(idx_pos)), replace=False)
-    pick_neg = rng.choice(idx_neg, size=min(n_neg, len(idx_neg)), replace=False)
-    pick = np.concatenate([pick_pos, pick_neg])
-    rng.shuffle(pick)
-    return X.iloc[pick], y.iloc[pick]
 
 
 def fit_all(df: pd.DataFrame) -> List[ClfResult]:
@@ -267,22 +303,18 @@ def fit_all(df: pd.DataFrame) -> List[ClfResult]:
 
     results: List[ClfResult] = []
     for name, pipe in _make_models().items():
-        # SVM gets a subsample because RBF-SVC is O(N²)
-        if name == "svm":
-            Xt, yt = _subsample(
-                X_train, y_train,
-                n=config.CLASSIFIER.svm_subsample,
-                random_state=rs,
-            )
-            logger.info("Fitting %s on %d rows (subsampled) …", name, len(Xt))
-        else:
-            Xt, yt = X_train, y_train
-            logger.info("Fitting %s on %d rows …", name, len(Xt))
-
-        pipe.fit(Xt, yt)
-        y_pred = pipe.predict(X_test)
+        logger.info("Fitting %s on %d rows …", name, len(X_train))
+        pipe.fit(X_train, y_train)
+        y_pred  = pipe.predict(X_test)
         y_proba = pipe.predict_proba(X_test)[:, 1]
         metrics = evaluate(y_test.to_numpy(), y_pred, y_proba)
+
+        # 3-fold CV ROC-AUC on training data for a variance estimate
+        cv_aucs = cross_val_score(pipe, X_train, y_train, cv=3,
+                                  scoring="roc_auc", n_jobs=-1)
+        metrics["cv_roc_auc_mean"] = float(cv_aucs.mean())
+        metrics["cv_roc_auc_std"]  = float(cv_aucs.std())
+
         report = classification_report(y_test, y_pred, digits=3,
                                         zero_division=0)
         logger.info("%s → %s", name, {k: round(v, 3) for k, v in metrics.items()})

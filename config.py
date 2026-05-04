@@ -21,7 +21,7 @@ CACHE_DIR: Path = DATA_DIR / "cache"
 for _d in (DATA_DIR, FIGURE_DIR, MODEL_DIR, CACHE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
-SQLITE_PATH: Path = DATA_DIR / "sheffield_crime.sqlite"
+SQLITE_PATH: Path = DATA_DIR / "crime.db"
 
 
 # ---------------------------------------------------------------------------
@@ -87,9 +87,9 @@ class ClusterConfig:
 
 @dataclass
 class ForecastConfig:
-    test_horizon_months: int = 6
-    cv_initial_months: int = 24        # raised from 18 — Prophet needs more history
-    cv_step_months: int = 3
+    test_horizon_months: int = 3           # was 6 — too long for 18 months of history
+    cv_initial_months: int = 10            # was 24 — produced 0 CV folds
+    cv_step_months: int = 2               # was 3 — gives 3 folds: [10,12,14]
     arima_order_search: List[Tuple[int, int, int]] = field(
         default_factory=lambda: [
             (1, 1, 1), (2, 1, 1), (1, 1, 2), (2, 1, 2),
@@ -105,11 +105,9 @@ class ClassifierConfig:
     target: str = "is_violent"      # binary: violent vs non-violent
     test_size: float = 0.2
     random_state: int = 42
-    rf_n_estimators: int = 300
-    rf_max_depth: int = 12           # prevent tiny-cell memorisation
-    rf_min_samples_leaf: int = 50    # smooth leaf predictions
-    svm_c: float = 1.0
-    svm_subsample: int = 15000       # cap SVM training size — RBF-SVC is O(N²)
+    rf_n_estimators: int = 400
+    rf_max_depth: int = 15
+    rf_min_samples_leaf: int = 20    # was 50 — finer splits improve recall on minority class
     class_weight: str = "balanced"    # fixes majority-class collapse
 
 
