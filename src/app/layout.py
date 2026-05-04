@@ -95,14 +95,14 @@ def build_layout(cats, months, neighbourhoods) -> dbc.Container:
                         className="text-muted",
                     ),
                 ], md=9),
-                dbc.Col(
-                    html.Div([
-                        html.Small("Built by ", className="text-muted"),
-                        html.A("Mohammed", href="https://github.com/",
-                               target="_blank"),
-                    ], className="text-end pt-3"),
-                    md=3,
-                ),
+                # dbc.Col(
+                #     html.Div([
+                #         html.Small("Built by ", className="text-muted"),
+                #         html.A("Mohammed", href="https://github.com/",
+                #                target="_blank"),
+                #     ], className="text-end pt-3"),
+                #     md=3,
+                # ),
             ], className="mb-3"),
 
             # KPI row
@@ -138,7 +138,7 @@ def build_layout(cats, months, neighbourhoods) -> dbc.Container:
             html.Footer(
                 html.Small(
                     "Data: UK Police open API · Sheffield polygon defined in config.py · "
-                    "Project © Mohammed",
+                    "Project © Mohamed",
                     className="text-muted",
                 ),
                 className="text-center py-2",
