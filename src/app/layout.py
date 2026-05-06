@@ -185,10 +185,10 @@ def build_layout(cats, months, neighbourhoods) -> dbc.Container:
                             _rf_tab_content(cats),
                             label="RF Forecast",
                         ),
-                        dbc.Tab(
-                            html.Div(id="metrics-panel", className="p-3"),
-                            label="Model metrics",
-                        ),
+                        # dbc.Tab(
+                        #     html.Div(id="metrics-panel", className="p-3"),
+                        #     label="Model metrics",
+                        # ),
                     ]),
                 ], md=9),
             ]),
