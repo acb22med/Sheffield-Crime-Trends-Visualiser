@@ -80,6 +80,62 @@ def _filter_card(cats: list, months: list, neighbourhoods: list) -> dbc.Card:
     )
 
 
+def _rf_tab_content(cats: list) -> html.Div:
+    """Layout for the new Random Forest forecast tab.
+
+    The tab is self-contained: its own category dropdown (does NOT affect the
+    rest of the dashboard), a per-category history-plus-forecast chart, and a
+    small results panel beneath. We default to the highest-volume category so
+    the chart is never empty on first open.
+    """
+    default_cat = "anti-social-behaviour" if "anti-social-behaviour" in cats else cats[0]
+    return html.Div(
+        [
+            dbc.Row(
+                [
+                    dbc.Col(
+                        [
+                            html.Label("Crime category", className="fw-bold mb-2"),
+                            dcc.Dropdown(
+                                id="rf-category-dropdown",
+                                options=[
+                                    {"label": c.replace("-", " ").title(), "value": c}
+                                    for c in cats
+                                ],
+                                value=default_cat,
+                                clearable=False,
+                                className="mb-3",
+                            ),
+                        ],
+                        md=4,
+                    ),
+                    dbc.Col(
+                        html.Div(
+                            [
+                                html.Small(
+                                    "Random Forest regressor on the (category, month) panel. "
+                                    "Features: lag-1, lag-2, lag-3, lag-6 of the per-category count, "
+                                    "a 3-month rolling mean, calendar terms, and the encoded category. "
+                                    "Forecast is recursive: each predicted month feeds into the lag "
+                                    "features of the next.",
+                                    className="text-muted",
+                                ),
+                            ],
+                            className="pt-2",
+                        ),
+                        md=8,
+                    ),
+                ],
+                className="mb-2",
+            ),
+            dcc.Graph(id="rf-forecast-graph", style={"height": "440px"}),
+            html.Hr(),
+            html.Div(id="rf-summary-panel", className="p-2"),
+        ],
+        className="p-3",
+    )
+
+
 def build_layout(cats, months, neighbourhoods) -> dbc.Container:
     return dbc.Container(
         fluid=True,
@@ -124,6 +180,10 @@ def build_layout(cats, months, neighbourhoods) -> dbc.Container:
                         dbc.Tab(
                             dcc.Graph(id="category-graph", style={"height": "620px"}),
                             label="Category breakdown",
+                        ),
+                        dbc.Tab(
+                            _rf_tab_content(cats),
+                            label="RF Forecast",
                         ),
                         dbc.Tab(
                             html.Div(id="metrics-panel", className="p-3"),

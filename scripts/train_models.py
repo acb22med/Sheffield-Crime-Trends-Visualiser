@@ -15,9 +15,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import config                                             # noqa: E402
-from src.data.features import engineer, monthly_totals    # noqa: E402
-from src.models import classification, clustering, forecasting  # noqa: E402
+import config_v1                                                    # noqa: E402
+from src.data.features import engineer, monthly_totals              # noqa: E402
+from src.models import classification, clustering, forecasting      # noqa: E402
+from src.models import forecasting_rf                               # noqa: E402
 
 
 def main() -> None:
@@ -25,9 +26,9 @@ def main() -> None:
         level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s"
     )
 
-    if not config.SQLITE_PATH.exists():
+    if not config_v1.SQLITE_PATH.exists():
         logging.error("SQLite DB not found at %s — run scripts/run_pipeline.py first",
-                      config.SQLITE_PATH)
+                      config_v1.SQLITE_PATH)
         sys.exit(1)
 
     df = engineer()
@@ -38,8 +39,11 @@ def main() -> None:
     # logging.info("Training clustering models …")
     # km, db, sweep = clustering.run(df)
 
-    logging.info("Training forecasting models …")
+    logging.info("Training forecasting models (ARIMA / Prophet, city-wide aggregate) …")
     cv = forecasting.run(monthly_totals(df))
+
+    logging.info("Training Random Forest forecaster (category-month panel) …")
+    rf_summary = forecasting_rf.run(df)
 
     logging.info("Training classifiers …")
     clf = classification.run(df)
@@ -48,6 +52,12 @@ def main() -> None:
     logging.info("Classifier metrics:\n%s", clf.to_string(index=False))
     logging.info("Forecast CV summary (mean):\n%s",
                  cv.groupby("model")[["rmse", "mae"]].mean().round(2))
+    if rf_summary:
+        m = rf_summary["metrics"]
+        logging.info(
+            "RF forecaster — MAE=%.2f  RMSE=%.2f  MAE%%-of-mean=%.1f%%",
+            m["mae"], m["rmse"], m["mae_pct_of_mean"],
+        )
 
 
 if __name__ == "__main__":

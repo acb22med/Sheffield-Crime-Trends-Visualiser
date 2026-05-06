@@ -101,9 +101,30 @@ def _map_choropleth(df: pd.DataFrame) -> go.Figure:
 
 
 # ---------------------------------------------------------------------------
-# Trend / forecast figure
+# Trend / forecast figure (existing tab — RF overlay added)
 # ---------------------------------------------------------------------------
-def _trend_fig(df: pd.DataFrame) -> go.Figure:
+def _load_rf_future_total(active_categories: list[str] | None) -> pd.DataFrame | None:
+    """Aggregate the RF per-category forecast to a city-wide total, optionally
+    restricted to the categories the user has filtered to.
+    """
+    rf_per_cat_path = config_v1.DATA_DIR / "forecast_rf_future.csv"
+    rf_total_path = config_v1.DATA_DIR / "forecast_rf_future_total.csv"
+
+    if active_categories and rf_per_cat_path.exists():
+        per_cat = pd.read_csv(rf_per_cat_path, parse_dates=["month_date"])
+        per_cat = per_cat[per_cat["category"].isin(active_categories)]
+        if per_cat.empty:
+            return None
+        return (per_cat.groupby("month_date")["rf_forecast"].sum()
+                       .reset_index().rename(columns={"month_date": "date"}))
+
+    if rf_total_path.exists():
+        return pd.read_csv(rf_total_path, parse_dates=["month_date"]) \
+                 .rename(columns={"month_date": "date"})
+    return None
+
+
+def _trend_fig(df: pd.DataFrame, active_categories: list[str] | None = None) -> go.Figure:
     fig = go.Figure()
     if df.empty:
         return _empty_fig("No data for current filters")
@@ -132,7 +153,7 @@ def _trend_fig(df: pd.DataFrame) -> go.Figure:
             line={"color": "#ff7f0e", "dash": "dot"}, name="Prophet fit",
         ))
 
-    # Future forecast
+    # Future forecast — ARIMA & Prophet (city-wide aggregate models)
     fut_path = config_v1.DATA_DIR / "future_forecast.csv"
     if fut_path.exists():
         f = pd.read_csv(fut_path, parse_dates=["date"])
@@ -145,6 +166,17 @@ def _trend_fig(df: pd.DataFrame) -> go.Figure:
             x=f["date"], y=f["prophet_forecast"],
             mode="lines+markers", line={"color": "#d62728", "dash": "dash"},
             name="Prophet forecast",
+        ))
+
+    # Future forecast — Random Forest (panel model summed back to city-wide total)
+    rf = _load_rf_future_total(active_categories)
+    if rf is not None and not rf.empty:
+        fig.add_trace(go.Scatter(
+            x=rf["date"], y=rf["rf_forecast"],
+            mode="lines+markers",
+            line={"color": "#8B2A2A", "dash": "solid", "width": 3},
+            marker={"size": 9, "symbol": "diamond"},
+            name="Random Forest forecast",
         ))
 
     fig.update_layout(
@@ -175,6 +207,122 @@ def _category_fig(df: pd.DataFrame) -> go.Figure:
 
 
 # ---------------------------------------------------------------------------
+# RF forecast tab — per-category history + forecast
+# ---------------------------------------------------------------------------
+def _rf_per_category_fig(df_full: pd.DataFrame, category: str) -> go.Figure:
+    """History + forecast for a single category."""
+    if not category:
+        return _empty_fig("Select a category")
+
+    # History: observed counts per month for this category, from the full
+    # engineered frame. We don't apply the global category-filter here — the
+    # RF tab is self-contained.
+    hist = (df_full[df_full["category"] == category]
+              .groupby("month_date").size()
+              .rename("count").reset_index())
+
+    fig = go.Figure()
+    if not hist.empty:
+        fig.add_trace(go.Scatter(
+            x=hist["month_date"], y=hist["count"],
+            mode="lines+markers", name="Observed",
+            line={"color": "#1f77b4", "width": 2.5},
+        ))
+
+    # Forecast: load the per-category RF forecast and select this category.
+    rf_path = config_v1.DATA_DIR / "forecast_rf_future.csv"
+    if rf_path.exists():
+        rf = pd.read_csv(rf_path, parse_dates=["month_date"])
+        rf = rf[rf["category"] == category]
+
+        if not rf.empty:
+            # Connect the last observed point to the first forecast point so
+            # the lines visually meet rather than leaving a one-month gap.
+            if not hist.empty:
+                last_obs_date = hist["month_date"].iloc[-1]
+                last_obs_count = hist["count"].iloc[-1]
+                connector = pd.DataFrame({
+                    "month_date": [last_obs_date],
+                    "rf_forecast": [last_obs_count],
+                })
+                rf_plot = pd.concat([connector, rf], ignore_index=True)
+            else:
+                rf_plot = rf
+
+            fig.add_trace(go.Scatter(
+                x=rf_plot["month_date"], y=rf_plot["rf_forecast"],
+                mode="lines+markers",
+                line={"color": "#8B2A2A", "dash": "dash", "width": 3},
+                marker={"size": 9, "symbol": "diamond"},
+                name="Random Forest forecast",
+            ))
+
+    pretty = category.replace("-", " ").title()
+    fig.update_layout(
+        title=f"{pretty} — observed history and Random Forest forecast",
+        xaxis_title="Month", yaxis_title="Reported crimes",
+        hovermode="x unified",
+        legend={"orientation": "h", "y": -0.18},
+        margin={"l": 40, "r": 20, "t": 50, "b": 20},
+    )
+    return fig
+
+
+def _rf_summary_panel(df_full: pd.DataFrame, category: str) -> html.Div:
+    """Compact text panel below the chart: predicted next-3-month counts and
+    overall held-out MAE."""
+    if not category:
+        return html.Div()
+
+    rf_path = config_v1.DATA_DIR / "forecast_rf_future.csv"
+    metrics_path = config_v1.DATA_DIR / "forecast_rf_metrics.csv"
+
+    blocks: list = []
+
+    if rf_path.exists():
+        rf = pd.read_csv(rf_path, parse_dates=["month_date"])
+        rf = rf[rf["category"] == category].sort_values("month_date")
+        if not rf.empty:
+            cards = []
+            for _, row in rf.iterrows():
+                cards.append(
+                    dbc.Col(
+                        kpi_card(
+                            row["month_date"].strftime("%b %Y"),
+                            f"{int(round(row['rf_forecast'])):,}",
+                            "predicted incidents",
+                        ),
+                        md=4,
+                    )
+                )
+            blocks.append(html.H6("Forecast for the next 3 months",
+                                  className="text-muted mb-2"))
+            blocks.append(dbc.Row(cards, className="mb-3"))
+
+    if metrics_path.exists():
+        m = pd.read_csv(metrics_path)
+        if not m.empty:
+            row = m.iloc[0]
+            blocks.append(
+                html.Small(
+                    f"Model held-out MAE: {row['mae']:.1f}  ·  "
+                    f"RMSE: {row['rmse']:.1f}  ·  "
+                    f"MAE = {row['mae_pct_of_mean']:.1f}% of mean  ·  "
+                    f"Train rows: {int(row['train_rows']):,}, "
+                    f"test rows: {int(row['test_rows']):,}",
+                    className="text-muted",
+                )
+            )
+
+    if not blocks:
+        return html.P(
+            "Train the Random Forest forecaster first (scripts/train_models.py).",
+            className="text-muted",
+        )
+    return html.Div(blocks)
+
+
+# ---------------------------------------------------------------------------
 # Metrics panel (HTML, not a figure)
 # ---------------------------------------------------------------------------
 def _metrics_panel() -> html.Div:
@@ -187,11 +335,21 @@ def _metrics_panel() -> html.Div:
         cards.append(dbc.Table.from_dataframe(
             cdf.round(3), striped=True, bordered=True, hover=True, size="sm"))
 
+    # RF forecaster — headline forecasting result
+    rf_path = config_v1.DATA_DIR / "forecast_rf_metrics.csv"
+    if rf_path.exists():
+        rdf = pd.read_csv(rf_path).round(2)
+        cards.append(html.H4("Random Forest forecaster — held-out test set",
+                             className="mt-4"))
+        cards.append(dbc.Table.from_dataframe(
+            rdf, striped=True, bordered=True, hover=True, size="sm"))
+
     fc_path = config_v1.DATA_DIR / "forecast_cv.csv"
     if fc_path.exists():
         fdf = pd.read_csv(fc_path)
         summary = fdf.groupby("model")[["rmse", "mae"]].mean().round(2).reset_index()
-        cards.append(html.H4("Forecasting — walk-forward CV average", className="mt-4"))
+        cards.append(html.H4("ARIMA / Prophet — walk-forward CV average",
+                             className="mt-4"))
         cards.append(dbc.Table.from_dataframe(
             summary, striped=True, bordered=True, hover=True, size="sm"))
 
@@ -264,11 +422,9 @@ def register_callbacks(app, full_df: pd.DataFrame, cluster_df: pd.DataFrame | No
         if df.empty:
             return _empty_fig("No crimes match the current filters")
 
-        # Down-sample aggressively for responsiveness when style is scatter.
         if style == "scatter" and len(df) > 8000:
             df = df.sample(8000, random_state=0)
 
-        # Merge cluster labels if requested.
         if cluster_mode in ("kmeans", "dbscan") and cluster_df is not None:
             merged = df.merge(
                 cluster_df[["latitude", "longitude", "month",
@@ -286,7 +442,7 @@ def register_callbacks(app, full_df: pd.DataFrame, cluster_df: pd.DataFrame | No
             return _map_choropleth(merged)
         return _map_scatter(merged, col)
 
-    # --- Trend ---
+    # --- Trend (existing time-series tab, with RF overlay) ---
     @app.callback(
         Output("trend-graph", "figure"),
         Input("date-range", "start_date"),
@@ -295,9 +451,10 @@ def register_callbacks(app, full_df: pd.DataFrame, cluster_df: pd.DataFrame | No
         Input("neighbourhood-filter", "value"),
     )
     def update_trend(start, end, cats, neighbourhoods):
-        return _trend_fig(_filtered(start, end, cats, neighbourhoods))
+        return _trend_fig(_filtered(start, end, cats, neighbourhoods),
+                          active_categories=cats)
 
-    # --- Category ---
+    # --- Category breakdown ---
     @app.callback(
         Output("category-graph", "figure"),
         Input("date-range", "start_date"),
@@ -307,6 +464,23 @@ def register_callbacks(app, full_df: pd.DataFrame, cluster_df: pd.DataFrame | No
     )
     def update_category(start, end, cats, neighbourhoods):
         return _category_fig(_filtered(start, end, cats, neighbourhoods))
+
+    # --- RF Forecast tab (new) ---
+    # Self-contained: only listens to its own dropdown, ignores the side-panel
+    # category filter. This keeps it predictable for the user.
+    @app.callback(
+        Output("rf-forecast-graph", "figure"),
+        Input("rf-category-dropdown", "value"),
+    )
+    def update_rf_forecast(category):
+        return _rf_per_category_fig(full_df, category)
+
+    @app.callback(
+        Output("rf-summary-panel", "children"),
+        Input("rf-category-dropdown", "value"),
+    )
+    def update_rf_summary(category):
+        return _rf_summary_panel(full_df, category)
 
     # --- Metrics panel ---
     @app.callback(Output("metrics-panel", "children"), Input("cluster-toggle", "value"))
